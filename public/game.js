@@ -9,6 +9,7 @@ const $ = (id) => document.getElementById(id);
 const FRUIT = ['🍌', '🍓', '🍇', '🍏'];
 const FRUIT_NAME = ['바나나', '딸기', '자두', '라임'];
 const FLIP_MS = 1700, RING_PAUSE_MS = 1800, GRACE_MS = 700, LOCK_MS = 1000;     // 서버와 같은 값
+const TAP_AFTER_RING_MS = RING_PAUSE_MS / 2;                                       // 벨이 맞은 뒤 이 시간이 지나야 카드를 눌러 낼 수 있다 (서버와 같음)
 const CPU_MATCH_MS = 240000;
 const TUT = /[?&]tutorial=1/.test(location.search);                              // 튜토리얼: 컴퓨터가 벨을 누르지 않고 카드도 천천히 넘긴다
 const T = { over: 900 };                                                          // 시간(ms). 시험용으로 줄일 수 있다
@@ -67,6 +68,7 @@ let st = null;                      // 컴퓨터 대전 판 (나는 0번)
 let nCpu = 2;                       // 컴퓨터 대전 인원
 let room = null, netDown = false, recorded = '';
 let flipTimer = 0, overTimer = 0, aiTimers = [], pauseUntil = 0, graceUntil = 0, lockUntil = 0, matchEnd = 0;
+let nextFlipAt = 0, flipDur = FLIP_MS, tapFrom = 0;       // 다음 카드가 저절로 나갈 시각과 그 제한 시간(막대용) · 이 시각부터 눌러 낼 수 있다
 let ringInfo = null;                // 방금 벨 결과 { who, ok, gained, paid, fruit, until } (화면 표시용)
 let seenRing = 0, prevUp = [], prevFlips = -1;
 const online = () => mode === 'online';
@@ -96,7 +98,12 @@ function seatHtml(p, i, m, flipped) {
   const cls = ['seat', i === m.you ? 'me' : '', p.alive ? '' : 'out', m.state === 'playing' && m.turn === i && p.alive ? 'turn' : '', ri && ri.who === i ? (ri.ok ? 'won' : 'lost') : ''].filter(Boolean).join(' ');
   const badge = ri && ri.who === i ? `<span class="gain${ri.ok ? '' : ' bad'}">${ri.ok ? `+${ri.gained}` : `-${ri.paid}`}</span>` : '';
   const off = p.online || p.gone || !p.alive ? '' : ' <small style="color:#c0392b">끊김</small>';
-  return `<div class="${cls}" data-i="${i}">${badge}<div class="hd"><span class="nm">${esc(p.name)}${off}</span><span class="ct">🂠 ${p.alive ? total : 0}</span></div>${cardHtml(p.alive ? p.top : -1, flipped.has(i) ? 'flip' : '')}</div>`;
+  let mine = '';
+  if (i === m.you) {                                              // 내 칸: 내 차례에는 눌러서 카드를 낼 수 있고, 안 누르면 막대가 다 줄었을 때 저절로 나간다
+    const left = Math.max(0, nextFlipAt - performance.now());
+    mine = `<div class="tbar"><i style="animation-duration:${flipDur}ms;animation-delay:-${Math.max(0, flipDur - left)}ms"></i></div><div class="tapme">👆 내 차례! 눌러서 카드 내기</div>`;
+  }
+  return `<div class="${cls}" data-i="${i}">${badge}<div class="hd"><span class="nm">${esc(p.name)}${off}</span><span class="ct">🂠 ${p.alive ? total : 0}</span></div>${cardHtml(p.alive ? p.top : -1, flipped.has(i) ? 'flip' : '')}${mine}</div>`;
 }
 function render() {
   const m = model();
@@ -197,6 +204,18 @@ addEventListener('keydown', (e) => {
   if ((e.code === 'Space' || e.code === 'Enter') && !overlayOpen() && document.activeElement === document.body) { e.preventDefault(); onBell(); }
 });
 
+// ---------- 카드 내기 ----------
+// 내 차례에 내 칸을 누르면 바로 낸다. 안 누르면 제한 시간(FLIP_MS)이 지나 저절로 나간다
+function onFlipTap() {
+  const m = model();
+  if (!m || phase !== 'play' || m.state !== 'playing' || m.turn !== m.you || !m.players[m.you].alive) return;
+  if (performance.now() < tapFrom) return;
+  if (online()) { if (!netDown) net.send('flip'); return; }
+  clearTimeout(flipTimer);
+  cpuFlip(true);
+}
+$('meSeat').addEventListener('pointerdown', (e) => { e.preventDefault(); onFlipTap(); });
+
 // 벨 결과를 화면에 알린다 (who: 누른 사람)
 function announceRing(m, ev) {
   const snap = ev.ok ? snapTops() : [];                          // 화면을 다시 그리기 전에 깔려 있던 카드를 기억한다
@@ -228,19 +247,23 @@ function startCpu(level, n) {
   matchEnd = performance.now() + CPU_MATCH_MS;
   hideOverlay(); render();
   say(TUT ? '카드가 한 장씩 넘어가요.\n같은 과일이 모두 합쳐서 정확히 5개가 되면 🔔 을 눌러요!' : '같은 과일이 모두 합쳐서 정확히 5개가 되면 먼저 🔔 을 눌러요!\n(아닌데 누르면 카드를 나눠 줘요)');
+  nextFlipAt = performance.now() + 1500; flipDur = 1500; tapFrom = 0;
   flipTimer = setTimeout(cpuFlip, 1500);
 }
-function cpuFlip() {
+function cpuFlip(byTap = false) {
   if (phase !== 'play' || !st || online()) return;
   if (performance.now() >= matchEnd) { L.finishByTime(st); return endCpu(); }
   if (performance.now() < pauseUntil) { flipTimer = setTimeout(cpuFlip, Math.max(30, pauseUntil - performance.now())); return; }
   const r = L.flipNext(st);
   st.events.length = 0;
   if (r) sfx.flip();
+  if (r && byTap && r.who === 0) tutorialSignal('flip');
+  const wait = TUT ? 2300 : FLIP_MS;
+  nextFlipAt = performance.now() + wait; flipDur = wait;
   render();
   if (st.winner >= 0) return endCpu();
   aiAfterFlip();
-  flipTimer = setTimeout(cpuFlip, TUT ? 2300 : FLIP_MS);
+  flipTimer = setTimeout(cpuFlip, wait);
 }
 // 새 카드가 나온 뒤: 5개가 되었으면 컴퓨터가 반응 시간 뒤에 벨을 누르고, 가끔은 엉뚱하게 잘못 누른다
 function aiAfterFlip() {
@@ -261,7 +284,7 @@ function ringLocal(who) {
   st.events.length = 0;
   if (!r) return;
   const m = model();
-  if (r.ok) { graceUntil = now + GRACE_MS; pauseUntil = now + RING_PAUSE_MS; aiTimers.forEach(clearTimeout); aiTimers = []; }
+  if (r.ok) { graceUntil = now + GRACE_MS; pauseUntil = now + RING_PAUSE_MS; tapFrom = now + TAP_AFTER_RING_MS; nextFlipAt = pauseUntil; flipDur = RING_PAUSE_MS; aiTimers.forEach(clearTimeout); aiTimers = []; }
   announceRing(m, { who, ok: r.ok, gained: r.gained || 0, paid: r.paid || 0, fruit: r.fruit === undefined ? -1 : r.fruit });
   if (st.winner >= 0) endCpu();
 }
@@ -372,6 +395,10 @@ function applyRoom(r) {
   if (newGame && r.state === 'playing') { sfx.found(); say('카드가 자동으로 넘어가요.\n같은 과일이 모두 합쳐서 정확히 5개가 되면 먼저 🔔!'); }
   if (r.state !== 'over' && $('overlay').dataset.screen !== 'confirm') hideOverlay();
   if (!newGame && r.flips !== prevFlips && r.state === 'playing') sfx.flip();
+  const now = performance.now();
+  if (newGame && r.state === 'playing') { nextFlipAt = now + FLIP_MS * 1.5; flipDur = FLIP_MS * 1.5; tapFrom = 0; }
+  else if (r.flips !== prevFlips) { nextFlipAt = now + FLIP_MS; flipDur = FLIP_MS; }
+  if (r.ringEv && r.ringEv.seq > seenRing && r.ringEv.ok) { nextFlipAt = now + RING_PAUSE_MS; flipDur = RING_PAUSE_MS; tapFrom = now + TAP_AFTER_RING_MS; }
   prevFlips = r.flips;
   const m = model();
   if (r.ringEv && r.ringEv.seq > seenRing) { seenRing = r.ringEv.seq; announceRing(m, r.ringEv); } else render();
@@ -518,6 +545,6 @@ if (loadSession()) {
 else showTitle();
 
 /* @test-hooks:start */
-window.__hg = { get st() { return st; }, get mode() { return mode; }, get phase() { return phase; }, get room() { return room; }, T, onBell, startCpu, render, ringLocal, cpuFlip };
+window.__hg = { get st() { return st; }, get mode() { return mode; }, get phase() { return phase; }, get room() { return room; }, T, onBell, onFlipTap, startCpu, render, ringLocal, cpuFlip };
 /* @test-hooks:end */
 })();

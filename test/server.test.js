@@ -138,6 +138,39 @@ test('cards are flipped automatically one at a time in turn order', async () => 
   closeAll(a, b);
 });
 
+test('the player whose turn it is can flip at once, nobody else can, and the auto timer still works', async () => {
+  // 따로 느린 서버(카드가 3초에 한 장 저절로 나감)를 띄워서, 누르는 즉시 나가는지 본다
+  const port = freePort();
+  const slow = spawn(process.execPath, ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(port), FLIP_MS: '3000', RING_PAUSE_MS: '250', MATCH_MS: '20000' }, stdio: 'ignore' });
+  const ws2 = [];
+  try {
+    for (let i = 0; i < 80; i++) { try { await new Promise((res, rej) => { const r = http.request({ host: '127.0.0.1', port, path: '/', method: 'GET' }, (x) => { x.resume(); x.on('end', res); }); r.on('error', rej); r.end(); }); break; } catch { await sleep(100); } }
+    const mk = (name) => new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
+      const c = { ws, room: null, queued: false };
+      ws.on('message', (d) => { const m = JSON.parse(d); if (m.t === 'room') c.room = m; if (m.t === 'queued') c.queued = true; });
+      ws.on('open', () => { ws.send(JSON.stringify({ t: 'hello', name: name })); ws2.push(ws); resolve(c); });
+    });
+    const a = await mk('가'), b = await mk('나');
+    send(a, 'quick'); await until(() => a.queued); send(b, 'quick');
+    assert.ok(await until(() => a.room && b.room && a.room.state === 'playing'));
+    const cs = [a, b];
+    const mover = cs.find((c) => c.room.turn === c.room.you), other = cs.find((c) => c !== mover);
+    const f0 = mover.room.flips;
+    send(other, 'flip'); await sleep(250);
+    assert.strictEqual(mover.room.flips, f0, 'a flip from the wrong player is ignored');
+    const t0 = Date.now();
+    send(mover, 'flip');
+    assert.ok(await until(() => mover.room.flips === f0 + 1, 1500), 'the mover flips at once');
+    assert.ok(Date.now() - t0 < 1000, 'much sooner than the 3s auto timer');
+    assert.strictEqual(other.room.flips, f0 + 1);
+    assert.notStrictEqual(mover.room.turn, mover.room.you, 'the turn passes on');
+    send(mover, 'flip'); await sleep(250);
+    assert.strictEqual(mover.room.flips, f0 + 1, 'flipping again out of turn does nothing');
+    assert.ok(await until(() => mover.room.flips >= f0 + 2, 4500), 'the next card still comes out by itself after the time limit');
+  } finally { ws2.forEach((w) => w.close()); slow.kill(); }
+});
+
 test('a wrong bell costs a card and a short lock, and cards are conserved', async () => {
   await ready;
   const [a, b] = await pair();

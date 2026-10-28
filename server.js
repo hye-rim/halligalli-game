@@ -12,6 +12,7 @@ const L = require('./public/logic.js');
 const PORT = process.env.PORT || 3017;
 const FLIP_MS = Number(process.env.FLIP_MS) || 1700;          // 카드를 한 장씩 넘기는 간격. 시험에서는 환경변수로 줄인다
 const RING_PAUSE_MS = Number(process.env.RING_PAUSE_MS) || 1800;   // 벨이 맞은 뒤 결과를 보여 주는 시간
+const TAP_AFTER_RING_MS = Math.round(RING_PAUSE_MS / 2);   // 벨이 맞은 뒤 이 시간이 지나야 카드를 눌러 낼 수 있다 (쓸어 가는 모습을 보여 주는 동안은 못 낸다)
 const MATCH_MS = Number(process.env.MATCH_MS) || 360000;        // 한 판 제한 시간. 넘기면 카드가 가장 많은 사람이 이긴다
 const BELL_GRACE_MS = 700;      // 누군가 벨을 맞힌 직후 이 시간 안에 온 다른 사람의 벨은 벌 없이 무시한다 (네트워크가 늦은 사람 보호)
 const WRONG_LOCK_MS = 1000;     // 벨을 틀리게 누르면 이 시간 동안 다시 못 누른다
@@ -123,6 +124,7 @@ function createRoom(isPrivate) {
     matchTimer: null,
     endAt: 0,
     graceUntil: 0,
+    tapFrom: 0,              // 이 시각부터 차례인 사람이 카드를 눌러 낼 수 있다
     ringEv: null,            // 마지막 벨 결과 { seq, who, ok, gained, paid, fruit } — 화면이 이걸 보고 알려 준다
     ringSeq: 0,
     flipEv: null,            // 마지막 카드 넘김 { seq, who, card }
@@ -188,6 +190,7 @@ function startGame(room) {
   room.ringEv = null;
   room.flipEv = null;
   room.graceUntil = 0;
+  room.tapFrom = 0;
   room.rematch.clear();
   room.games++;
   room.endAt = Date.now() + MATCH_MS;
@@ -339,6 +342,16 @@ const handlers = {
     if (seat && room.state === 'waiting') vacate(room, seat);
   },
 
+  // 카드 내기: 내 차례인 사람이 카드를 누르면 기다리지 않고 바로 낸다 (안 누르면 FLIP_MS 뒤에 서버가 대신 낸다)
+  flip(client) {
+    const room = rooms.get(client.roomCode);
+    const seat = room && seatOf(room, client);
+    const g = room && room.game;
+    if (!seat || room.state !== 'playing' || !g.alive[seat.index] || g.turn !== seat.index) return;
+    if (Date.now() < room.tapFrom) return;
+    doFlip(room);
+  },
+
   // 벨 누르기: 먼저 도착한 요청이 이긴다. 5개가 맞으면 열린 카드를 모두 가져가고, 틀리면 다른 사람에게 한 장씩 물어 준다
   bell(client) {
     const room = rooms.get(client.roomCode);
@@ -352,7 +365,7 @@ const handlers = {
     g.events.length = 0;
     if (!r) return;
     room.ringEv = { seq: ++room.ringSeq, who: seat.index, ok: r.ok, gained: r.gained || 0, paid: r.paid || 0, fruit: r.fruit === undefined ? -1 : r.fruit };
-    if (r.ok) { room.graceUntil = now + BELL_GRACE_MS; scheduleFlip(room, RING_PAUSE_MS); }
+    if (r.ok) { room.graceUntil = now + BELL_GRACE_MS; room.tapFrom = now + TAP_AFTER_RING_MS; scheduleFlip(room, RING_PAUSE_MS); }
     else seat.lockUntil = now + WRONG_LOCK_MS;
     if (g.winner >= 0) return endGame(room, g.winner, g.reason);
     pushRoom(room);
