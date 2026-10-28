@@ -116,8 +116,13 @@
   .fc.n1 .fr { grid-template-columns:1fr; font-size:34px; }
   .fc.n3 .fr span:nth-child(3), .fc.n5 .fr span:nth-child(5) { grid-column:1 / -1; }
   .fc.f0 { background:#fff3b0; } .fc.f1 { background:#ffd5d5; } .fc.f2 { background:#e5d4ff; } .fc.f3 { background:#d6f5c4; }
-  .fc.flip { animation:flipin .25s ease-out; }
-  @keyframes flipin { from { transform:translateY(-14px) rotateY(80deg); opacity:.2; } to { transform:none; opacity:1; } }
+  .fc.flip { animation:flipin .26s ease-out .24s backwards; }   /* 덱에서 날아온 뒤(.24s) 앞면이 뒤집힌다 */
+  @keyframes flipin { from { transform:rotateY(90deg) scale(.9); opacity:0; } to { transform:none; opacity:1; } }
+  .fc.back { background:repeating-linear-gradient(45deg,#ff5fa2 0 7px,#ff8cbd 7px 14px); }
+  #fx { position:absolute; inset:0; z-index:30; pointer-events:none; }
+  #fx .fl { position:absolute; left:0; top:0; will-change:transform, opacity; }
+  #fx .fl .fc { margin:0; }
+  .seat .ct { display:inline-block; }
   #mid { width:100%; min-height:64px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; text-align:center; }
   #msg { font-size:15px; color:#fff; text-shadow:0 2px 0 var(--ink); line-height:1.35; min-height:38px; white-space:pre-line; }
   #msg.good { color:#b9ffc8; } #msg.bad { color:#ffc2c2; }
@@ -175,6 +180,7 @@
         <div id="meSeat" style="width:100%"></div>
         <div id="bellWrap"><button id="bell" aria-label="벨"><span>🔔</span><small>벨!</small></button></div>
       </div>
+      <div id="fx"></div>
       <div id="overlay"></div>
     </div>
   </div>

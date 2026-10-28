@@ -96,7 +96,7 @@ function seatHtml(p, i, m, flipped) {
   const cls = ['seat', i === m.you ? 'me' : '', p.alive ? '' : 'out', m.state === 'playing' && m.turn === i && p.alive ? 'turn' : '', ri && ri.who === i ? (ri.ok ? 'won' : 'lost') : ''].filter(Boolean).join(' ');
   const badge = ri && ri.who === i ? `<span class="gain${ri.ok ? '' : ' bad'}">${ri.ok ? `+${ri.gained}` : `-${ri.paid}`}</span>` : '';
   const off = p.online || p.gone || !p.alive ? '' : ' <small style="color:#c0392b">끊김</small>';
-  return `<div class="${cls}">${badge}<div class="hd"><span class="nm">${esc(p.name)}${off}</span><span class="ct">🂠 ${p.alive ? total : 0}</span></div>${cardHtml(p.alive ? p.top : -1, flipped.has(i) ? 'flip' : '')}</div>`;
+  return `<div class="${cls}" data-i="${i}">${badge}<div class="hd"><span class="nm">${esc(p.name)}${off}</span><span class="ct">🂠 ${p.alive ? total : 0}</span></div>${cardHtml(p.alive ? p.top : -1, flipped.has(i) ? 'flip' : '')}</div>`;
 }
 function render() {
   const m = model();
@@ -108,6 +108,7 @@ function render() {
   $('seats').className = opps.length === 1 ? 'one' : opps.length === 3 ? 'three' : '';
   $('seats').innerHTML = opps.map(([p, i]) => seatHtml(p, i, m, flipped)).join('');
   $('meSeat').innerHTML = seatHtml(m.players[m.you], m.you, m, flipped);
+  flipped.forEach(dealFx);
   const bell = $('bell');
   const locked = performance.now() < lockUntil;
   bell.classList.toggle('locked', locked);
@@ -126,6 +127,54 @@ function renderHud(m = model()) {
   $('resignBtn').style.display = online() && room && room.state === 'playing' ? '' : 'none';
 }
 function say(t, cls = '') { const el = $('msg'); el.textContent = t; el.className = cls; }
+
+// ---------- 카드 움직임 (덱에서 나오기 · 벨 맞히면 쓸어 가기) ----------
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const seatEl = (i) => document.querySelector(`.seat[data-i="${i}"]`);
+function relRect(el) {
+  const w = $('wrap').getBoundingClientRect(), r = el.getBoundingClientRect();
+  return { x: r.left - w.left, y: r.top - w.top, w: r.width, h: r.height };
+}
+// 카드 하나를 from 에서 to 로 날린다 (둘 다 relRect). 크기는 from 기준이고 끝에서 sc 배로 줄어든다
+function flyCard(html, from, to, o = {}) {
+  if (REDUCED || document.hidden) return;
+  const d = document.createElement('div');
+  d.className = 'fl';
+  d.innerHTML = html;
+  const c = d.firstElementChild;
+  c.style.width = from.w + 'px'; c.style.height = from.h + 'px';
+  $('fx').appendChild(d);
+  const sx = from.x, sy = from.y;
+  const tx = to.x + to.w / 2 - from.w / 2, ty = to.y + to.h / 2 - from.h / 2;
+  const a = d.animate([
+    { transform: `translate(${sx}px,${sy}px) scale(${o.s0 || 1}) rotate(0deg)`, opacity: 1 },
+    { transform: `translate(${tx}px,${ty}px) scale(${o.s1 || 1}) rotate(${o.rot || 0}deg)`, opacity: o.fade ? 0.15 : 1 },
+  ], { duration: o.dur || 300, delay: o.delay || 0, easing: 'cubic-bezier(.25,.7,.3,1)', fill: 'both' });
+  a.onfinish = () => { d.remove(); if (o.done) o.done(); };
+  a.oncancel = () => d.remove();
+}
+// 새 카드가 나올 때: 그 사람의 덱(🂠 숫자)에서 카드 뒷면이 날아와 제자리에서 앞면으로 뒤집힌다
+function dealFx(i) {
+  const seat = seatEl(i);
+  const slot = seat && seat.querySelector('.fc'), deck = seat && seat.querySelector('.ct');
+  if (!slot || !deck) return;
+  const to = relRect(slot), d = relRect(deck);
+  flyCard('<div class="fc back"></div>', { x: d.x + d.w / 2 - to.w / 2, y: d.y + d.h / 2 - to.h / 2, w: to.w, h: to.h }, to, { s0: 0.3, dur: 240 });
+}
+// 벨을 맞혔을 때: 벨 누르기 전에 깔려 있던 카드(snap)가 이긴 사람 덱으로 쓸려 간다
+function snapTops() {
+  return [...document.querySelectorAll('.seat')].map((s) => ({ i: Number(s.dataset.i), el: s.querySelector('.fc') }))
+    .filter((t) => t.el && !t.el.classList.contains('empty')).map((t) => ({ i: t.i, html: t.el.outerHTML, rect: relRect(t.el) }));
+}
+function sweepFx(snap, who) {
+  const seat = seatEl(who), deck = seat && seat.querySelector('.ct');
+  if (!deck) return;
+  const to = relRect(deck);
+  snap.forEach((c, k) => flyCard(c.html.replace(/ flip/, ''), c.rect, to, {
+    s1: 0.28, rot: (k % 2 ? 1 : -1) * (14 + k * 7), fade: true, dur: 520, delay: 160 + k * 90,
+    done: k === snap.length - 1 ? () => { const t = seatEl(who) && seatEl(who).querySelector('.ct'); if (t) t.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.5)' }, { transform: 'scale(1)' }], 300); } : null,
+  }));
+}
 
 // ---------- 창 ----------
 const overlayOpen = () => !$('overlay').classList.contains('hidden');
@@ -150,6 +199,7 @@ addEventListener('keydown', (e) => {
 
 // 벨 결과를 화면에 알린다 (who: 누른 사람)
 function announceRing(m, ev) {
+  const snap = ev.ok ? snapTops() : [];                          // 화면을 다시 그리기 전에 깔려 있던 카드를 기억한다
   const name = ev.who === m.you ? '내' : m.players[ev.who].name;
   const subj = ev.who === m.you ? '내가' : ga(m.players[ev.who].name);
   ringInfo = { ...ev, until: performance.now() + RING_PAUSE_MS };
@@ -165,6 +215,7 @@ function announceRing(m, ev) {
   }
   if (ev.who === m.you) tutorialSignal(ev.ok ? 'ring' : 'wrong');
   render();
+  if (ev.ok) sweepFx(snap, ev.who);
 }
 
 // ---------- 컴퓨터 대전 ----------
